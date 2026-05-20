@@ -8,6 +8,8 @@ import {
 } from "@mantine/core";
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
+
+import { Providers } from "@/components/Providers";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -78,7 +80,7 @@ export default function RootLayout({
       </head>
       <body className="min-h-full flex flex-col bg-background text-foreground">
         <MantineProvider theme={theme} defaultColorScheme="dark">
-          {children}
+          <Providers>{children}</Providers>
         </MantineProvider>
       </body>
     </html>

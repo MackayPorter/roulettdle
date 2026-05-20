@@ -1,5 +1,5 @@
--- Run in Supabase SQL editor when you want one row per player per UTC calendar day.
--- Remove duplicate (player_key, play_date_utc) rows first if this fails.
+-- Only needed if primary key is NOT already (player_key, play_date_utc).
+-- If you use composite PK on those columns, upsert onConflict works without this.
 
-alter table public.daily_scores
-  add constraint daily_scores_player_date_uniq unique (player_key, play_date_utc);
+-- alter table public.daily_scores
+--   add constraint daily_scores_player_date_uniq unique (player_key, play_date_utc);

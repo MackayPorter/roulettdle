@@ -13,29 +13,46 @@ import {
   Text,
   Title,
 } from "@mantine/core";
+import { useSession } from "next-auth/react";
 import { useCallback, useEffect, useRef, useState, startTransition } from "react";
 
-import { getOrCreatePlayerKey } from "@/lib/playerKey";
+import { AuthHeader } from "@/components/AuthHeader";
+import { hasFinishedToday, markLostToday } from "@/lib/dailyPlayCache";
+
+function playerKeyFromEmail(email: string | null | undefined): string | null {
+  if (!email) return null;
+  return email.toLowerCase().trim();
+}
 
 const SPIN_DURATION_MS = 800;
 
 type ScoreRow = {
-  id: string;
   player_key: string;
   play_date_utc: string;
   score: number;
   display_name: string | null;
   created_at: string;
+  Lost?: boolean;
 };
+
+function rowKey(row: ScoreRow): string {
+  return `${row.player_key}-${row.play_date_utc}`;
+}
 
 function rowLabel(row: ScoreRow): string {
   const name = row.display_name?.trim();
   if (name) return name;
-  return `Player ${row.player_key.slice(0, 8)}`;
+  return row.player_key;
 }
+
+type AllTimeHigh = {
+  player_key: string;
+  score: number;
+};
 
 type LeaderboardPanelProps = {
   leaderboard: ScoreRow[];
+  allTimeHigh: AllTimeHigh | null;
   leaderboardLoading: boolean;
   leaderboardError: string | null;
   /** Stretch to parent height (play card height on desktop / square on mobile). */
@@ -44,6 +61,7 @@ type LeaderboardPanelProps = {
 
 function LeaderboardPanel({
   leaderboard,
+  allTimeHigh,
   leaderboardLoading,
   leaderboardError,
   fillHeight = false,
@@ -116,7 +134,7 @@ function LeaderboardPanel({
           <Stack gap="xs">
             {leaderboard.map((row, i) => (
               <Flex
-                key={row.id}
+                key={rowKey(row)}
                 justify="space-between"
                 align="center"
                 gap="md"
@@ -140,7 +158,12 @@ function LeaderboardPanel({
                   >
                     {i + 1}
                   </Text>
-                  <Text size="sm" truncate title={rowLabel(row)} c="white">
+                  <Text
+                    size="sm"
+                    truncate
+                    c="white"
+                    title={row.player_key}
+                  >
                     {rowLabel(row)}
                   </Text>
                 </Flex>
@@ -158,11 +181,53 @@ function LeaderboardPanel({
           </Stack>
         )}
       </ScrollArea>
+
+      <Box
+        mt="md"
+        pt="md"
+        style={{ borderTop: "1px solid rgba(255, 255, 255, 0.12)" }}
+      >
+        <Text size="xs" fw={800} tt="uppercase" c="gold.3" mb="xs">
+          Top score ever
+        </Text>
+        {leaderboardLoading ? (
+          <Loader color="white" size="xs" />
+        ) : allTimeHigh ? (
+          <Flex justify="space-between" align="center" gap="md" wrap="nowrap">
+            <Text
+              size="sm"
+              truncate
+              c="white"
+              miw={0}
+              flex={1}
+              title={allTimeHigh.player_key}
+            >
+              {allTimeHigh.player_key}
+            </Text>
+            <Text
+              fw={700}
+              c="gold.3"
+              fz="sm"
+              style={{ fontVariantNumeric: "tabular-nums" }}
+            >
+              {allTimeHigh.score.toLocaleString()}
+            </Text>
+          </Flex>
+        ) : (
+          <Text size="sm" c="white" opacity={0.88}>
+            No record yet.
+          </Text>
+        )}
+      </Box>
     </Card>
   );
 }
 
 export default function Home() {
+  const { data: session, status: sessionStatus } = useSession();
+  const playerKey = playerKeyFromEmail(session?.user?.email);
+  const signedIn = sessionStatus === "authenticated" && Boolean(playerKey);
+
   const [coins, setCoins] = useState(100);
   const [topWinnings, setTopWinnings] = useState(coins);
   const [gameEnded, setGameEnded] = useState(false);
@@ -171,9 +236,11 @@ export default function Home() {
   const spinTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [leaderboard, setLeaderboard] = useState<ScoreRow[]>([]);
+  const [allTimeHigh, setAllTimeHigh] = useState<AllTimeHigh | null>(null);
   const [leaderboardLoading, setLeaderboardLoading] = useState(true);
   const [leaderboardError, setLeaderboardError] = useState<string | null>(null);
   const [submissionNotice, setSubmissionNotice] = useState<string | null>(null);
+  const [doneForDay, setDoneForDay] = useState(false);
 
   const loadLeaderboard = useCallback(async () => {
     setLeaderboardLoading(true);
@@ -191,20 +258,35 @@ export default function Home() {
             : "Could not load leaderboard";
         setLeaderboardError(msg);
         setLeaderboard([]);
+        setAllTimeHigh(null);
         return;
       }
-      const o = data as { playDateUtc?: unknown; scores?: unknown };
+      const o = data as {
+        playDateUtc?: unknown;
+        scores?: unknown;
+        allTimeHigh?: unknown;
+      };
       setLeaderboard(Array.isArray(o.scores) ? (o.scores as ScoreRow[]) : []);
+      const ath = o.allTimeHigh;
+      if (
+        ath &&
+        typeof ath === "object" &&
+        "player_key" in ath &&
+        typeof (ath as AllTimeHigh).player_key === "string" &&
+        "score" in ath &&
+        typeof (ath as AllTimeHigh).score === "number"
+      ) {
+        setAllTimeHigh(ath as AllTimeHigh);
+      } else {
+        setAllTimeHigh(null);
+      }
     } catch {
       setLeaderboardError("Could not load leaderboard");
       setLeaderboard([]);
+      setAllTimeHigh(null);
     } finally {
       setLeaderboardLoading(false);
     }
-  }, []);
-
-  useEffect(() => {
-    getOrCreatePlayerKey();
   }, []);
 
   useEffect(() => {
@@ -213,73 +295,109 @@ export default function Home() {
     });
   }, [loadLeaderboard]);
 
-  const submitScore = useCallback(
-    async (score: number) => {
-      setSubmissionNotice(null);
-      const playerKey = getOrCreatePlayerKey();
-      if (!playerKey) return;
+  useEffect(() => {
+    if (leaderboardLoading || sessionStatus === "loading") return;
 
-      const body = JSON.stringify({
-        playerKey,
-        score: Math.trunc(score),
-        displayName: null,
-      });
+    const row = playerKey
+      ? leaderboard.find((r) => r.player_key === playerKey)
+      : undefined;
+    const finished =
+      (signedIn && hasFinishedToday(playerKey)) || row?.Lost === true;
 
-      try {
-        const res = await fetch("/api/scores", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body,
-        });
-        const data: unknown = await res.json().catch(() => ({}));
-        const message =
-          data &&
-            typeof data === "object" &&
-            "message" in data &&
-            typeof (data as { message: unknown }).message === "string"
-            ? (data as { message: string }).message
-            : "Could not save score";
-
-        if (res.ok) {
-          await loadLeaderboard();
-          return;
+    startTransition(() => {
+      if (finished) {
+        if (row?.Lost && playerKey) markLostToday(playerKey);
+        setDoneForDay(true);
+        if (row) {
+          setCoins(row.score);
+          setTopWinnings(row.score);
         }
-
-        if (res.status === 409) {
-          setSubmissionNotice("Already played today.");
-        } else {
-          setSubmissionNotice(message);
-          console.error(message);
-        }
-      } catch (e) {
-        console.error(e);
-        setSubmissionNotice("Could not save score");
+        return;
       }
-    },
-    [loadLeaderboard],
-  );
+      const score = row?.score ?? 100;
+      setCoins(score);
+      setTopWinnings(score);
+      setDoneForDay(false);
+    });
+  }, [leaderboard, leaderboardLoading, playerKey, sessionStatus, signedIn]);
 
   function endGame() {
     setGameEnded(true);
   }
 
-  function applySpinResult() {
-    const win = Math.random() < 0.5;
+  async function performSpin(): Promise<void> {
+    if (!signedIn) return;
 
-    if (win) {
-      setCoins((prev) => prev * 2);
-      setTopWinnings((prev) => prev * 2);
-      setLastResult("W");
-    } else {
-      setCoins(coins * 0);
-      setLastResult("L");
-      endGame();
-      void submitScore(topWinnings);
+    try {
+      const res = await fetch("/api/spin", {
+        method: "POST",
+        credentials: "include",
+      });
+      const data = (await res.json().catch(() => null)) as {
+        message?: string;
+        result?: string;
+        score?: number;
+        lost?: boolean;
+        context?: string;
+        code?: string;
+        details?: string;
+        hint?: string;
+        debug?: unknown;
+      } | null;
+
+      if (res.status === 401) {
+        setSubmissionNotice("Sign in to spin.");
+        return;
+      }
+
+      if (res.status === 409) {
+        if (playerKey) markLostToday(playerKey);
+        setDoneForDay(true);
+        setSubmissionNotice("Already played today.");
+        return;
+      }
+
+      if (
+        !res.ok ||
+        (data?.result !== "W" && data?.result !== "L") ||
+        typeof data.score !== "number"
+      ) {
+        console.error("[spin] failed", res.status, data);
+        const detail =
+          data && typeof data === "object" && "details" in data
+            ? String((data as { details?: string }).details)
+            : null;
+        const hint =
+          data && typeof data === "object" && "hint" in data
+            ? String((data as { hint?: string }).hint)
+            : null;
+        const parts = [data?.message ?? "Spin failed", detail, hint].filter(
+          Boolean,
+        );
+        setSubmissionNotice(parts.join(" — "));
+        return;
+      }
+
+      const nextScore = data.score;
+      setCoins(nextScore);
+      setTopWinnings((prev) => Math.max(prev, nextScore));
+      setLastResult(data.result);
+
+      if (data.lost) {
+        if (playerKey) markLostToday(playerKey);
+        setDoneForDay(true);
+        endGame();
+      }
+
+      await loadLeaderboard();
+    } catch (e) {
+      console.error("[spin] network error", e);
+      setSubmissionNotice("Spin failed — check console");
     }
   }
 
   function handleSpinClick() {
-    if (coins <= 0 || spinning) return;
+    if (!signedIn || spinning || doneForDay || gameEnded) return;
 
     if (spinTimerRef.current) {
       clearTimeout(spinTimerRef.current);
@@ -287,11 +405,14 @@ export default function Home() {
 
     setSpinning(true);
     setLastResult(null);
+    setSubmissionNotice(null);
 
     spinTimerRef.current = setTimeout(() => {
-      applySpinResult();
-      setSpinning(false);
-      spinTimerRef.current = null;
+      void (async () => {
+        await performSpin();
+        setSpinning(false);
+        spinTimerRef.current = null;
+      })();
     }, SPIN_DURATION_MS);
   }
 
@@ -304,6 +425,7 @@ export default function Home() {
             "linear-gradient(180deg, #061a10 0%, var(--background) 38%, var(--background) 100%)",
         }}
       >
+        <AuthHeader />
         <Container size="sm" py="xl">
           <Stack align="center" gap="lg" pt="xl">
             <Title
@@ -369,10 +491,16 @@ export default function Home() {
 
                   <Button
                     size="md"
-                    disabled={coins <= 0 || spinning}
+                    disabled={!signedIn || spinning || doneForDay || gameEnded}
                     onClick={handleSpinClick}
                   >
-                    {spinning ? "Spinning…" : "Spin"}
+                    {!signedIn
+                      ? "Sign in to spin"
+                      : doneForDay
+                        ? "Played today"
+                        : spinning
+                          ? "Spinning…"
+                          : "Spin"}
                   </Button>
                 </Stack>
 
@@ -406,6 +534,7 @@ export default function Home() {
                 <LeaderboardPanel
                   fillHeight
                   leaderboard={leaderboard}
+                  allTimeHigh={allTimeHigh}
                   leaderboardLoading={leaderboardLoading}
                   leaderboardError={leaderboardError}
                 />
@@ -420,6 +549,7 @@ export default function Home() {
               <LeaderboardPanel
                 fillHeight
                 leaderboard={leaderboard}
+                allTimeHigh={allTimeHigh}
                 leaderboardLoading={leaderboardLoading}
                 leaderboardError={leaderboardError}
               />
