@@ -6,6 +6,7 @@ import {
   createTheme,
   mantineHtmlProps,
 } from "@mantine/core";
+import { Analytics } from "@vercel/analytics/next";
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 
@@ -82,6 +83,7 @@ export default function RootLayout({
         <MantineProvider theme={theme} defaultColorScheme="dark">
           <Providers>{children}</Providers>
         </MantineProvider>
+        <Analytics />
       </body>
     </html>
   );
